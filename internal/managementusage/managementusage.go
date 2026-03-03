@@ -2,6 +2,8 @@ package managementusage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,8 @@ const (
 	windowWeeklySeconds  = 7 * 24 * 60 * 60
 	defaultFetchTimeout  = 10 * time.Second
 	defaultMaxConcurrent = 4
+	minBackoffDuration   = 3 * time.Minute
+	maxBackoffDuration   = 10 * time.Minute
 )
 
 type Window struct {
@@ -46,6 +50,11 @@ type Snapshot struct {
 type Service struct {
 	AuthDir string
 	Timeout time.Duration
+
+	mu               sync.Mutex
+	backoffUntil     time.Time
+	backoffReason    string
+	lastGoodSnapshot map[string]AccountUsage
 }
 
 type credentialFile struct {
@@ -70,7 +79,11 @@ type usageWindow struct {
 	ResetAt            interface{} `json:"reset_at"`
 }
 
-func (s Service) Fetch(ctx context.Context) (Snapshot, error) {
+func (s *Service) Fetch(ctx context.Context) (Snapshot, error) {
+	if snapshot, active := s.snapshotFromBackoff(); active {
+		return snapshot, nil
+	}
+
 	authDir := strings.TrimSpace(s.AuthDir)
 	if authDir == "" {
 		return Snapshot{}, errors.New("auth dir not configured")
@@ -110,6 +123,8 @@ func (s Service) Fetch(ctx context.Context) (Snapshot, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var okCount int
+	var shouldBackoff bool
+	var backoffReason string
 
 	for _, file := range files {
 		file := file
@@ -130,44 +145,52 @@ func (s Service) Fetch(ctx context.Context) (Snapshot, error) {
 			}
 			defer func() { <-sem }()
 
-			usage := s.fetchOne(ctx, client, filepath.Join(authDir, file))
+			usage, triggerBackoff, reason := s.fetchOne(ctx, client, filepath.Join(authDir, file))
 			mu.Lock()
 			snapshot.ByFile[file] = usage
 			if usage.Status == "ok" || usage.Status == "no_access" {
 				okCount++
+			}
+			if triggerBackoff && !shouldBackoff {
+				shouldBackoff = true
+				backoffReason = reason
 			}
 			mu.Unlock()
 		}()
 	}
 
 	wg.Wait()
+	if shouldBackoff {
+		return s.activateBackoff(backoffReason), nil
+	}
 	if okCount == 0 {
 		snapshot.Status = "unavailable"
 		snapshot.Message = "failed to fetch quota for all accounts"
 	}
+	s.updateLastGoodSnapshot(snapshot.ByFile)
 	return snapshot, nil
 }
 
-func (s Service) fetchOne(ctx context.Context, client *http.Client, path string) AccountUsage {
+func (s *Service) fetchOne(ctx context.Context, client *http.Client, path string) (AccountUsage, bool, string) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("read credential: %v", err)}
+		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("read credential: %v", err)}, false, ""
 	}
 
 	var cred credentialFile
 	if err := json.Unmarshal(raw, &cred); err != nil {
-		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("decode credential: %v", err)}
+		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("decode credential: %v", err)}, false, ""
 	}
 
 	token := stringValue(cred.AccessToken)
 	accountID := stringValue(cred.AccountID)
 	if token == "" || accountID == "" {
-		return AccountUsage{Status: "unavailable", Message: "missing access token or account id"}
+		return AccountUsage{Status: "unavailable", Message: "missing access token or account id"}, false, ""
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexUsageEndpoint, nil)
 	if err != nil {
-		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("build usage request: %v", err)}
+		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("build usage request: %v", err)}, false, ""
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Chatgpt-Account-Id", accountID)
@@ -176,13 +199,13 @@ func (s Service) fetchOne(ctx context.Context, client *http.Client, path string)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("request quota: %v", err)}
+		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("request quota: %v", err)}, false, ""
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("read quota response: %v", err)}
+		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("read quota response: %v", err)}, false, ""
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -193,12 +216,12 @@ func (s Service) fetchOne(ctx context.Context, client *http.Client, path string)
 		return AccountUsage{
 			Status:  "unavailable",
 			Message: fmt.Sprintf("HTTP %d %s", resp.StatusCode, message),
-		}
+		}, isBackoffHTTPStatus(resp.StatusCode), message
 	}
 
 	var payload usageResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("decode quota response: %v", err)}
+		return AccountUsage{Status: "unavailable", Message: fmt.Sprintf("decode quota response: %v", err)}, false, ""
 	}
 
 	fiveHour, weekly := pickWindows(payload.RateLimit)
@@ -222,7 +245,121 @@ func (s Service) fetchOne(ctx context.Context, client *http.Client, path string)
 		}
 	}
 
-	return usage
+	return usage, false, ""
+}
+
+func (s *Service) snapshotFromBackoff() (Snapshot, bool) {
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.backoffUntil.IsZero() {
+		return Snapshot{}, false
+	}
+	if !now.Before(s.backoffUntil) {
+		s.backoffUntil = time.Time{}
+		s.backoffReason = ""
+		return Snapshot{}, false
+	}
+
+	message := fmt.Sprintf(
+		"quota fetch backoff active until %s: %s",
+		s.backoffUntil.UTC().Format(time.RFC3339),
+		s.backoffReason,
+	)
+	cached := cloneUsageMap(s.lastGoodSnapshot)
+	if len(cached) > 0 {
+		return Snapshot{
+			Status:  "stale",
+			Message: message,
+			ByFile:  cached,
+		}, true
+	}
+	return Snapshot{
+		Status:  "unavailable",
+		Message: message,
+		ByFile:  map[string]AccountUsage{},
+	}, true
+}
+
+func (s *Service) activateBackoff(reason string) Snapshot {
+	if strings.TrimSpace(reason) == "" {
+		reason = "rate limited by upstream"
+	}
+	until := time.Now().Add(randomDurationInRange(minBackoffDuration, maxBackoffDuration))
+
+	s.mu.Lock()
+	s.backoffUntil = until
+	s.backoffReason = reason
+	cached := cloneUsageMap(s.lastGoodSnapshot)
+	s.mu.Unlock()
+
+	message := fmt.Sprintf(
+		"quota fetch backoff active until %s: %s",
+		until.UTC().Format(time.RFC3339),
+		reason,
+	)
+	if len(cached) > 0 {
+		return Snapshot{
+			Status:  "stale",
+			Message: message,
+			ByFile:  cached,
+		}
+	}
+	return Snapshot{
+		Status:  "unavailable",
+		Message: message,
+		ByFile:  map[string]AccountUsage{},
+	}
+}
+
+func (s *Service) updateLastGoodSnapshot(byFile map[string]AccountUsage) {
+	if len(byFile) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastGoodSnapshot == nil {
+		s.lastGoodSnapshot = map[string]AccountUsage{}
+	}
+	for file, usage := range byFile {
+		if usage.Status == "ok" || usage.Status == "no_access" {
+			s.lastGoodSnapshot[file] = usage
+		}
+	}
+}
+
+func isBackoffHTTPStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusForbidden
+}
+
+func randomDurationInRange(min, max time.Duration) time.Duration {
+	if min <= 0 && max <= 0 {
+		return 0
+	}
+	if max <= min {
+		return min
+	}
+
+	diff := max - min
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return min
+	}
+	offset := time.Duration(binary.LittleEndian.Uint64(b[:]) % uint64(diff+1))
+	return min + offset
+}
+
+func cloneUsageMap(src map[string]AccountUsage) map[string]AccountUsage {
+	if len(src) == 0 {
+		return map[string]AccountUsage{}
+	}
+	out := make(map[string]AccountUsage, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
 }
 
 func pickWindows(limit rateLimitWindow) (*usageWindow, *usageWindow) {

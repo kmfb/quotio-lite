@@ -15,6 +15,7 @@ import { ExclamationTriangleIcon } from '@radix-ui/react-icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getAccount, probeAccount } from '../api'
+import { nextPollMs } from '../lib/polling'
 import { UsageGauge } from '../components/UsageGauge'
 import { statusColor, statusLabel } from '../status'
 
@@ -28,8 +29,9 @@ export function AccountDetailPage() {
   const detailQuery = useQuery({
     queryKey: ['account', file],
     queryFn: () => getAccount(file),
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: true,
+    refetchInterval: () => nextPollMs(60_000, 120_000),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   })
 
   const probeMutation = useMutation({

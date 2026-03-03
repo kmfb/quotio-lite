@@ -15,11 +15,12 @@ Local Codex account control panel for Quotio-style workflows.
 - Manual probe with model `gpt-5.1-codex-mini`
 - Fine-grained status classification
 - Account detail page
-- Account list polling every 15s (background tab supported)
+- Account/detail polling every 60-120s with randomized intervals (foreground tab)
 - Per-account 5h/weekly usage from `https://chatgpt.com/backend-api/wham/usage`
 - Managed `CLIProxyAPI` runtime (start/stop/restart) on `127.0.0.1:8317`
 - Copy-ready endpoint + API key for other OpenAI-compatible apps
 - One-click API key rotation (single persistent key strategy)
+- Conservative usage caching + jitter + backoff to reduce rate-limit risk
 
 ## Prerequisites
 - Go `1.25+`

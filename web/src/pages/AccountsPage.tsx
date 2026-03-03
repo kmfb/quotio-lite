@@ -29,6 +29,7 @@ import {
   type AccountStatus,
 } from '../api'
 import { ProxyControlCard } from '../components/ProxyControlCard'
+import { nextPollMs } from '../lib/polling'
 import { UsageGauge } from '../components/UsageGauge'
 import { statusColor, statusLabel } from '../status'
 
@@ -58,8 +59,9 @@ export function AccountsPage() {
   const accountsQuery = useQuery({
     queryKey: ['accounts'],
     queryFn: listAccounts,
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: true,
+    refetchInterval: () => nextPollMs(60_000, 120_000),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   })
 
   const loginMutation = useMutation({
@@ -247,7 +249,7 @@ export function AccountsPage() {
           <Box>
             <Heading size="4">Accounts</Heading>
             <Text color="gray" size="2">
-              Polling every 15s with background refresh
+              Foreground refresh every 60-120s with randomized intervals
             </Text>
           </Box>
           <Flex gap="2" align="center">

@@ -1,6 +1,10 @@
 package managementusage
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+	"time"
+)
 
 func TestPickWindows(t *testing.T) {
 	five := &usageWindow{LimitWindowSeconds: 18000, UsedPercent: 28}
@@ -38,5 +42,28 @@ func TestExtractErrorMessage(t *testing.T) {
 	msg := extractErrorMessage(raw)
 	if msg != "usage_limit_reached" {
 		t.Fatalf("unexpected error message: %q", msg)
+	}
+}
+
+func TestIsBackoffHTTPStatus(t *testing.T) {
+	if !isBackoffHTTPStatus(http.StatusTooManyRequests) {
+		t.Fatalf("429 should trigger backoff")
+	}
+	if !isBackoffHTTPStatus(http.StatusForbidden) {
+		t.Fatalf("403 should trigger backoff")
+	}
+	if isBackoffHTTPStatus(http.StatusUnauthorized) {
+		t.Fatalf("401 should not trigger backoff")
+	}
+}
+
+func TestRandomDurationInRange(t *testing.T) {
+	min := 3 * time.Minute
+	max := 10 * time.Minute
+	for i := 0; i < 20; i++ {
+		got := randomDurationInRange(min, max)
+		if got < min || got > max {
+			t.Fatalf("duration out of range: %v", got)
+		}
 	}
 }

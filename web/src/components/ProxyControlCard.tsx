@@ -21,6 +21,7 @@ import {
   startProxy,
   stopProxy,
 } from '../api'
+import { nextPollMs } from '../lib/polling'
 
 type CopyTarget = 'endpoint' | 'api-key' | 'sample-env' | ''
 
@@ -32,15 +33,15 @@ export function ProxyControlCard() {
   const statusQuery = useQuery({
     queryKey: ['proxy-status'],
     queryFn: getProxyStatus,
-    refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
+    refetchInterval: () => nextPollMs(8_000, 15_000),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   })
 
   const credentialsQuery = useQuery({
     queryKey: ['proxy-credentials'],
     queryFn: getProxyCredentials,
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   })
 
   async function refreshRuntimeSnapshot() {
@@ -178,7 +179,7 @@ export function ProxyControlCard() {
           <Flex align="center" gap="1">
             <Spinner size="1" />
             <Text size="1" color="gray">
-              Runtime polling every 5s
+              Runtime polling every 8-15s
             </Text>
           </Flex>
         ) : null}

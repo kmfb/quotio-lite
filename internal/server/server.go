@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,13 +27,15 @@ type App struct {
 	accounts accounts.Store
 	login    login.Service
 	probe    probe.Service
-	usage    managementusage.Service
+	usage    *managementusage.Service
 	proxy    *proxyruntime.Manager
 
-	mu            sync.RWMutex
-	lastProbe     map[string]probeSnapshot
-	usageCachedAt time.Time
-	usageSnapshot managementusage.Snapshot
+	mu                 sync.RWMutex
+	lastProbe          map[string]probeSnapshot
+	usageCachedAt      time.Time
+	usageValidUntil    time.Time
+	usageSnapshot      managementusage.Snapshot
+	usageFetchInFlight chan struct{}
 }
 
 type probeSnapshot struct {
@@ -46,7 +50,7 @@ func New(cfg config.Config) *App {
 		accounts:  accounts.Store{AuthDir: cfg.AuthDir},
 		login:     login.Service{AuthDir: cfg.AuthDir, CLIProxyPath: cfg.CLIProxyPath},
 		probe:     probe.Service{AuthDir: cfg.AuthDir, CLIProxyPath: cfg.CLIProxyPath, Model: cfg.ProbeModel, RequestTimeout: cfg.ProbeTimeout},
-		usage:     managementusage.Service{AuthDir: cfg.AuthDir},
+		usage:     &managementusage.Service{AuthDir: cfg.AuthDir},
 		proxy:     proxyruntime.NewManager(cfg.CLIProxyPath, cfg.AuthDir),
 		lastProbe: map[string]probeSnapshot{},
 	}
@@ -326,15 +330,42 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 }
 
 func (a *App) getUsageSnapshot(ctx context.Context) managementusage.Snapshot {
-	const usageCacheTTL = 12 * time.Second
+	const usageCacheTTL = 120 * time.Second
+	const usageCacheJitterMax = 30 * time.Second
 
-	a.mu.RLock()
-	cachedAt := a.usageCachedAt
+	a.mu.Lock()
+	now := time.Now()
 	cached := a.usageSnapshot
-	a.mu.RUnlock()
-	if !cachedAt.IsZero() && time.Since(cachedAt) < usageCacheTTL {
+	validUntil := a.usageValidUntil
+	if !validUntil.IsZero() && now.Before(validUntil) {
+		a.mu.Unlock()
 		return cached
 	}
+
+	if inFlight := a.usageFetchInFlight; inFlight != nil {
+		a.mu.Unlock()
+		select {
+		case <-inFlight:
+		case <-ctx.Done():
+			a.mu.RLock()
+			fallback := a.usageSnapshot
+			a.mu.RUnlock()
+			if len(fallback.ByFile) > 0 || fallback.Status != "" {
+				return fallback
+			}
+			return managementusage.Snapshot{
+				Status:  "unavailable",
+				Message: ctx.Err().Error(),
+			}
+		}
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		return a.usageSnapshot
+	}
+
+	inFlight := make(chan struct{})
+	a.usageFetchInFlight = inFlight
+	a.mu.Unlock()
 
 	snapshot, err := a.usage.Fetch(ctx)
 	if err != nil {
@@ -344,11 +375,26 @@ func (a *App) getUsageSnapshot(ctx context.Context) managementusage.Snapshot {
 		}
 	}
 
+	validFor := usageCacheTTL + randomDurationUpTo(usageCacheJitterMax)
 	a.mu.Lock()
 	a.usageSnapshot = snapshot
 	a.usageCachedAt = time.Now()
+	a.usageValidUntil = a.usageCachedAt.Add(validFor)
+	close(inFlight)
+	a.usageFetchInFlight = nil
 	a.mu.Unlock()
 	return snapshot
+}
+
+func randomDurationUpTo(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	return time.Duration(binary.LittleEndian.Uint64(b[:]) % uint64(max+1))
 }
 
 func applyUsageToRecord(record *accounts.AccountRecord, snapshot managementusage.Snapshot) {
