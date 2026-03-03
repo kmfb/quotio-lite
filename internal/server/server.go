@@ -17,6 +17,7 @@ import (
 	"quotio-lite/internal/login"
 	"quotio-lite/internal/managementusage"
 	"quotio-lite/internal/probe"
+	"quotio-lite/internal/proxyruntime"
 )
 
 type App struct {
@@ -25,6 +26,7 @@ type App struct {
 	login    login.Service
 	probe    probe.Service
 	usage    managementusage.Service
+	proxy    *proxyruntime.Manager
 
 	mu            sync.RWMutex
 	lastProbe     map[string]probeSnapshot
@@ -45,6 +47,7 @@ func New(cfg config.Config) *App {
 		login:     login.Service{AuthDir: cfg.AuthDir, CLIProxyPath: cfg.CLIProxyPath},
 		probe:     probe.Service{AuthDir: cfg.AuthDir, CLIProxyPath: cfg.CLIProxyPath, Model: cfg.ProbeModel, RequestTimeout: cfg.ProbeTimeout},
 		usage:     managementusage.Service{AuthDir: cfg.AuthDir},
+		proxy:     proxyruntime.NewManager(cfg.CLIProxyPath, cfg.AuthDir),
 		lastProbe: map[string]probeSnapshot{},
 	}
 }
@@ -57,6 +60,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/accounts/login", a.handleLogin)
 	mux.HandleFunc("DELETE /api/accounts/{file}", a.handleDeleteAccount)
 	mux.HandleFunc("POST /api/accounts/{file}/probe", a.handleProbe)
+	mux.HandleFunc("GET /api/proxy/status", a.handleProxyStatus)
+	mux.HandleFunc("POST /api/proxy/start", a.handleProxyStart)
+	mux.HandleFunc("POST /api/proxy/stop", a.handleProxyStop)
+	mux.HandleFunc("POST /api/proxy/restart", a.handleProxyRestart)
+	mux.HandleFunc("GET /api/proxy/credentials", a.handleProxyCredentials)
+	mux.HandleFunc("POST /api/proxy/api-key/rotate", a.handleProxyRotateAPIKey)
 
 	return withCORS(withJSON(mux))
 }
@@ -64,17 +73,22 @@ func (a *App) Handler() http.Handler {
 func (a *App) handleMeta(w http.ResponseWriter, _ *http.Request) {
 	_, authErr := os.Stat(a.cfg.AuthDir)
 	_, cliErr := os.Stat(a.cfg.CLIProxyPath)
+	proxyMeta := a.proxy.Meta()
 
 	response := map[string]interface{}{
-		"version":            "v1",
-		"host":               a.cfg.Host,
-		"port":               a.cfg.Port,
-		"authDir":            a.cfg.AuthDir,
-		"cliProxyPath":       a.cfg.CLIProxyPath,
-		"probeModel":         a.cfg.ProbeModel,
-		"usageSource":        "chatgpt_wham_usage",
-		"authDirAccessible":  authErr == nil,
-		"cliProxyAccessible": cliErr == nil,
+		"version":                "v1.1",
+		"host":                   a.cfg.Host,
+		"port":                   a.cfg.Port,
+		"authDir":                a.cfg.AuthDir,
+		"cliProxyPath":           a.cfg.CLIProxyPath,
+		"probeModel":             a.cfg.ProbeModel,
+		"usageSource":            "chatgpt_wham_usage",
+		"authDirAccessible":      authErr == nil,
+		"cliProxyAccessible":     cliErr == nil,
+		"proxyManagedConfigPath": proxyMeta.ManagedConfigPath,
+		"proxyManagedStatePath":  proxyMeta.ManagedStatePath,
+		"proxyDefaultPort":       proxyMeta.Port,
+		"proxyHost":              proxyMeta.Host,
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -189,6 +203,76 @@ func (a *App) handleProbe(w http.ResponseWriter, r *http.Request) {
 	a.lastProbe[file] = probeSnapshot{Status: result.Classification, At: now, Message: result.RawSnippet}
 	a.mu.Unlock()
 
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := a.proxy.Status(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleProxyStart(w http.ResponseWriter, r *http.Request) {
+	status, err := a.proxy.Start(r.Context())
+	if err != nil {
+		var conflictErr *proxyruntime.PortConflictError
+		if errors.As(err, &conflictErr) {
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":        conflictErr.Error(),
+				"portConflict": conflictErr.Conflict,
+			})
+			return
+		}
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleProxyStop(w http.ResponseWriter, r *http.Request) {
+	status, err := a.proxy.Stop(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleProxyRestart(w http.ResponseWriter, r *http.Request) {
+	status, err := a.proxy.Restart(r.Context())
+	if err != nil {
+		var conflictErr *proxyruntime.PortConflictError
+		if errors.As(err, &conflictErr) {
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":        conflictErr.Error(),
+				"portConflict": conflictErr.Conflict,
+			})
+			return
+		}
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleProxyCredentials(w http.ResponseWriter, r *http.Request) {
+	result, err := a.proxy.Credentials(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handleProxyRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	result, err := a.proxy.RotateAPIKey(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

@@ -6,7 +6,7 @@ if [[ "${1:-}" == "--strict" ]]; then
   STRICT=1
 fi
 
-DEFAULT_TARGET="$HOME/Library/Application Support/Quotio/CLIProxyAPI"
+DEFAULT_TARGET="$HOME/.quotio-lite/bin/CLIProxyAPI"
 TARGET="${QUOTIO_LITE_CLIPROXY_PATH:-$DEFAULT_TARGET}"
 TARGET_DIR="$(dirname "$TARGET")"
 
@@ -38,6 +38,7 @@ fi
 mkdir -p "$TARGET_DIR"
 
 CANDIDATES=(
+  "$HOME/.quotio-lite/bin/CLIProxyAPI"
   "$HOME/Library/Application Support/Quotio/CLIProxyAPI"
   "$HOME/Library/Application Support/CLIProxyAPI/CLIProxyAPI"
   "/Applications/Quotio.app/Contents/MacOS/CLIProxyAPI"
@@ -58,7 +59,8 @@ done
 
 if [[ -n "$DOWNLOAD_URL" ]]; then
   tmp_file="$(mktemp)"
-  trap 'rm -f "$tmp_file"' EXIT
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -f "$tmp_file"; rm -rf "$tmp_dir"' EXIT
 
   log "downloading from QUOTIO_LITE_CLIPROXY_DOWNLOAD_URL"
   curl -fsSL "$DOWNLOAD_URL" -o "$tmp_file"
@@ -73,8 +75,28 @@ if [[ -n "$DOWNLOAD_URL" ]]; then
     fi
   fi
 
-  install -m 755 "$tmp_file" "$TARGET"
-  log "downloaded to: $TARGET"
+  extracted=""
+  case "$DOWNLOAD_URL" in
+    *.tar.gz|*.tgz)
+      tar -xzf "$tmp_file" -C "$tmp_dir"
+      extracted="$(find "$tmp_dir" -type f -name "CLIProxyAPI" | head -n1 || true)"
+      ;;
+    *.zip)
+      unzip -q "$tmp_file" -d "$tmp_dir"
+      extracted="$(find "$tmp_dir" -type f -name "CLIProxyAPI*" | head -n1 || true)"
+      ;;
+    *)
+      extracted="$tmp_file"
+      ;;
+  esac
+
+  if [[ -z "$extracted" || ! -f "$extracted" ]]; then
+    log "downloaded file does not contain CLIProxyAPI executable"
+    exit 1
+  fi
+
+  install -m 755 "$extracted" "$TARGET"
+  log "downloaded and installed to: $TARGET"
   exit 0
 fi
 

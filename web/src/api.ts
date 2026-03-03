@@ -58,6 +58,42 @@ export interface MetaResponse {
   usageSource: string
   authDirAccessible: boolean
   cliProxyAccessible: boolean
+  proxyManagedConfigPath: string
+  proxyManagedStatePath: string
+  proxyDefaultPort: number
+  proxyHost: string
+}
+
+export interface PortConflict {
+  occupied: boolean
+  pid?: number
+  command?: string
+}
+
+export interface ProxyStatus {
+  running: boolean
+  pid: number
+  host: string
+  port: number
+  endpoint: string
+  startedAt: string
+  binaryPath: string
+  binaryAccessible: boolean
+  apiKeyMasked: string
+  lastError: string
+  portConflict?: PortConflict
+}
+
+export interface ProxyCredentials {
+  endpoint: string
+  apiKeyMasked: string
+  apiKeyPlain: string
+  sampleEnv: string
+}
+
+export interface RotateApiKeyResponse {
+  status: ProxyStatus
+  apiKeyPlain: string
 }
 
 const API_BASE_URL =
@@ -74,7 +110,16 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const raw = await response.text()
-    throw new Error(raw || `Request failed: ${response.status}`)
+    let message = raw || `Request failed: ${response.status}`
+    try {
+      const parsed = JSON.parse(raw) as { error?: string }
+      if (parsed.error) {
+        message = parsed.error
+      }
+    } catch {
+      // keep raw message
+    }
+    throw new Error(message)
   }
 
   if (response.status === 204) {
@@ -122,4 +167,40 @@ export async function probeAccount(file: string): Promise<ProbeResult> {
       body: '{}',
     },
   )
+}
+
+export async function getProxyStatus(): Promise<ProxyStatus> {
+  return requestJSON<ProxyStatus>('/api/proxy/status')
+}
+
+export async function startProxy(): Promise<ProxyStatus> {
+  return requestJSON<ProxyStatus>('/api/proxy/start', {
+    method: 'POST',
+    body: '{}',
+  })
+}
+
+export async function stopProxy(): Promise<ProxyStatus> {
+  return requestJSON<ProxyStatus>('/api/proxy/stop', {
+    method: 'POST',
+    body: '{}',
+  })
+}
+
+export async function restartProxy(): Promise<ProxyStatus> {
+  return requestJSON<ProxyStatus>('/api/proxy/restart', {
+    method: 'POST',
+    body: '{}',
+  })
+}
+
+export async function getProxyCredentials(): Promise<ProxyCredentials> {
+  return requestJSON<ProxyCredentials>('/api/proxy/credentials')
+}
+
+export async function rotateProxyApiKey(): Promise<RotateApiKeyResponse> {
+  return requestJSON<RotateApiKeyResponse>('/api/proxy/api-key/rotate', {
+    method: 'POST',
+    body: '{}',
+  })
 }

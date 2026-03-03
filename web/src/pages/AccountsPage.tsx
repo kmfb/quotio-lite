@@ -28,6 +28,7 @@ import {
   type AccountRecord,
   type AccountStatus,
 } from '../api'
+import { ProxyControlCard } from '../components/ProxyControlCard'
 import { UsageGauge } from '../components/UsageGauge'
 import { statusColor, statusLabel } from '../status'
 
@@ -239,6 +240,8 @@ export function AccountsPage() {
 
   return (
     <Flex direction="column" gap="4">
+      <ProxyControlCard />
+
       <Card className="accounts-toolbar-card">
         <Flex align="center" justify="between" gap="3" wrap="wrap">
           <Box>

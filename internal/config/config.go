@@ -41,7 +41,7 @@ func Load() (Config, error) {
 		Host:         getenvOr(envHost, defaultHost),
 		Port:         defaultPort,
 		AuthDir:      getenvOr(envAuthDir, filepath.Join(home, ".cli-proxy-api")),
-		CLIProxyPath: getenvOr(envCLIProxyPath, filepath.Join(home, "Library", "Application Support", "Quotio", "CLIProxyAPI")),
+		CLIProxyPath: getenvOr(envCLIProxyPath, filepath.Join(home, ".quotio-lite", "bin", "CLIProxyAPI")),
 		ProbeModel:   getenvOr(envProbeModel, defaultProbeModel),
 		ProbeTimeout: defaultProbeTimeout,
 	}
