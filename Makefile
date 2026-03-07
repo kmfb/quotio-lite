@@ -1,6 +1,6 @@
 SHELL := /bin/zsh
 
-.PHONY: bootstrap ensure-cliproxy dev backend frontend test build proxy-status proxy-start proxy-stop proxy-restart
+.PHONY: bootstrap ensure-cliproxy cliproxy-check cliproxy-update dev backend frontend test build proxy-status proxy-start proxy-stop proxy-restart
 
 API_BASE := http://127.0.0.1:18417
 
@@ -8,6 +8,17 @@ bootstrap: ensure-cliproxy
 
 ensure-cliproxy:
 	@./scripts/ensure_cliproxyapi.sh
+
+cliproxy-check:
+	@./scripts/ensure_cliproxyapi.sh --check
+
+cliproxy-update:
+	@set -e; \
+	if [[ -n "$(VERSION)" ]]; then \
+		./scripts/ensure_cliproxyapi.sh --update --version "$(VERSION)"; \
+	else \
+		./scripts/ensure_cliproxyapi.sh --update --latest; \
+	fi
 
 dev: ensure-cliproxy
 	@set -e; \

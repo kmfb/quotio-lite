@@ -56,25 +56,34 @@ Behavior:
 - Optional integrity check via `QUOTIO_LITE_CLIPROXY_SHA256`.
 - Supports direct binaries and archives (`.tar.gz`, `.zip`) and auto-extracts `CLIProxyAPI`.
 - Keeps compatibility candidates from old Quotio install paths.
+- Supports CLI-based release update (`--check`, `--update --latest|--version`).
 
 ### Official Download Sources
 - Releases page: [router-for-me/CLIProxyAPI Releases](https://github.com/router-for-me/CLIProxyAPI/releases)
-- Latest tag (checked on 2026-03-03): [`v6.8.40`](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v6.8.40)
+- Recommended: use `make cliproxy-check` to resolve the current latest tag dynamically.
 
-Common assets:
-- macOS Apple Silicon: `CLIProxyAPI_6.8.40_darwin_arm64.tar.gz`
-- macOS Intel: `CLIProxyAPI_6.8.40_darwin_amd64.tar.gz`
-- Linux amd64: `CLIProxyAPI_6.8.40_linux_amd64.tar.gz`
-- Linux arm64: `CLIProxyAPI_6.8.40_linux_arm64.tar.gz`
-- Windows amd64: `CLIProxyAPI_6.8.40_windows_amd64.zip`
+Common asset naming:
+- macOS Apple Silicon: `CLIProxyAPI_<version>_darwin_arm64.tar.gz`
+- macOS Intel: `CLIProxyAPI_<version>_darwin_amd64.tar.gz`
+- Linux amd64: `CLIProxyAPI_<version>_linux_amd64.tar.gz`
+- Linux arm64: `CLIProxyAPI_<version>_linux_arm64.tar.gz`
+- Windows amd64: `CLIProxyAPI_<version>_windows_amd64.zip`
 
-Example (macOS Apple Silicon):
+### CLI update workflow (no UI/productization)
 
 ```bash
-export QUOTIO_LITE_CLIPROXY_DOWNLOAD_URL="https://github.com/router-for-me/CLIProxyAPI/releases/download/v6.8.40/CLIProxyAPI_6.8.40_darwin_arm64.tar.gz"
-export QUOTIO_LITE_CLIPROXY_SHA256="<paste-from-checksums.txt>"
-make bootstrap
+# Check current binary + latest GitHub release tag
+make cliproxy-check
+
+# Update to latest release
+make cliproxy-update
+
+# Update to a specific release tag
+make cliproxy-update VERSION=v6.8.47
 ```
+
+The updater verifies SHA256 from release `checksums.txt` when available,
+installs to a versioned binary path, then atomically switches the active target.
 
 ## Run
 
@@ -100,10 +109,12 @@ make proxy-restart
 - `QUOTIO_LITE_PORT` (default `18417`)
 - `QUOTIO_LITE_AUTH_DIR` (default `~/.cli-proxy-api`)
 - `QUOTIO_LITE_CLIPROXY_PATH` (default `~/.quotio-lite/bin/CLIProxyAPI`)
+- `QUOTIO_LITE_CLIPROXY_VERSION_DIR` (default `~/.quotio-lite/bin/versions`)
+- `QUOTIO_LITE_CLIPROXY_GITHUB_REPO` (default `router-for-me/CLIProxyAPI`)
 - `QUOTIO_LITE_PROBE_MODEL` (default `gpt-5.1-codex-mini`)
 - `QUOTIO_LITE_PROBE_TIMEOUT_SEC` (default `50`)
-- `QUOTIO_LITE_CLIPROXY_DOWNLOAD_URL` (optional, auto-download URL for CLIProxyAPI)
-- `QUOTIO_LITE_CLIPROXY_SHA256` (optional, sha256 check for downloaded binary)
+- `QUOTIO_LITE_CLIPROXY_DOWNLOAD_URL` (optional, auto-download URL override for ensure mode)
+- `QUOTIO_LITE_CLIPROXY_SHA256` (optional, SHA256 for override download)
 
 ## API
 - `GET /api/meta`
