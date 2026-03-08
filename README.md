@@ -17,6 +17,7 @@ Local Codex account control panel for Quotio-style workflows.
 - Account detail page
 - Account/detail polling every 60-120s with randomized intervals (foreground tab)
 - Per-account 5h/weekly usage from `https://chatgpt.com/backend-api/wham/usage`
+- Per-account expiry metadata from `https://codexcn.com/api/check-expiry`
 - Managed `CLIProxyAPI` runtime (start/stop/restart) on `127.0.0.1:8317`
 - Copy-ready endpoint + API key for other OpenAI-compatible apps
 - One-click API key rotation (single persistent key strategy)
