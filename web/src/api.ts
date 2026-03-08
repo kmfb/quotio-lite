@@ -58,11 +58,14 @@ export interface LoginCapabilities {
 
 export interface MetaResponse {
   version: string
+  mode?: 'dev' | 'service'
   host: string
   port: number
   authDir: string
   cliProxyPath: string
   probeModel: string
+  frontendDistDir?: string
+  frontendServing?: boolean
   usageSource: string
   authDirAccessible: boolean
   cliProxyAccessible: boolean
@@ -106,11 +109,14 @@ export interface RotateApiKeyResponse {
   apiKeyPlain: string
 }
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:18417'
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+
+function apiURL(path: string): string {
+  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
+}
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(apiURL(path), {
     headers: {
       'Content-Type': 'application/json',
       ...(init?.headers ?? {}),

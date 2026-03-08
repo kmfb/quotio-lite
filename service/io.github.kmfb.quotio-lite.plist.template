@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__INSTALL_BIN__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__SERVICE_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>QUOTIO_LITE_MODE</key>
+    <string>service</string>
+    <key>QUOTIO_LITE_FRONTEND_DIST_DIR</key>
+    <string>__INSTALL_WEB__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__STDOUT_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__STDERR_LOG__</string>
+</dict>
+</plist>

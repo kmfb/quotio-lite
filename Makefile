@@ -1,8 +1,15 @@
 SHELL := /bin/zsh
 
-.PHONY: bootstrap ensure-cliproxy cliproxy-check cliproxy-update dev backend frontend test build proxy-status proxy-start proxy-stop proxy-restart
+.PHONY: bootstrap ensure-cliproxy cliproxy-check cliproxy-update dev backend frontend test build proxy-status proxy-start proxy-stop proxy-restart service-install service-start service-stop service-restart service-status service-logs service-uninstall
 
-API_BASE := http://127.0.0.1:18417
+API_BASE ?= http://127.0.0.1:18417
+PNPM ?= pnpm
+GOCACHE ?= $(CURDIR)/.gocache
+WEB_NODE_OPTIONS ?= --use-bundled-ca
+WEB_BUILD := if [[ -f ./node_modules/typescript/bin/tsc && -f ./node_modules/vite/bin/vite.js ]]; then NODE_OPTIONS=$(WEB_NODE_OPTIONS) node ./node_modules/typescript/bin/tsc -b && NODE_OPTIONS=$(WEB_NODE_OPTIONS) node ./node_modules/vite/bin/vite.js build; else NODE_OPTIONS=$(WEB_NODE_OPTIONS) $(PNPM) build; fi
+SERVICE_SCRIPT := ./scripts/launchd_service.sh
+BUILD_DIR := build
+BUILD_BIN := $(BUILD_DIR)/quotio-lite
 
 bootstrap: ensure-cliproxy
 
@@ -22,9 +29,9 @@ cliproxy-update:
 
 dev: ensure-cliproxy
 	@set -e; \
-		(go run ./cmd/server) & \
+		(GOCACHE=$(GOCACHE) go run ./cmd/server) & \
 		BACKEND_PID=$$!; \
-		(cd web && corepack pnpm dev --host 127.0.0.1 --port 5173) & \
+		(cd web && NODE_OPTIONS=$(WEB_NODE_OPTIONS) $(PNPM) dev --host 127.0.0.1 --port 5173) & \
 		FRONTEND_PID=$$!; \
 		cleanup() { \
 			kill $$BACKEND_PID $$FRONTEND_PID 2>/dev/null || true; \
@@ -38,18 +45,41 @@ dev: ensure-cliproxy
 		done
 
 backend: ensure-cliproxy
-	go run ./cmd/server
+	GOCACHE=$(GOCACHE) go run ./cmd/server
 
 frontend:
-	cd web && corepack pnpm dev --host 127.0.0.1 --port 5173
+	cd web && NODE_OPTIONS=$(WEB_NODE_OPTIONS) $(PNPM) dev --host 127.0.0.1 --port 5173
 
 test:
-	go test ./cmd/... ./internal/...
-	cd web && corepack pnpm build
+	mkdir -p $(GOCACHE)
+	GOCACHE=$(GOCACHE) go test ./cmd/... ./internal/...
+	cd web && $(WEB_BUILD)
 
 build:
-	go build ./cmd/server
-	cd web && corepack pnpm build
+	mkdir -p $(BUILD_DIR) $(GOCACHE)
+	GOCACHE=$(GOCACHE) go build -o $(BUILD_BIN) ./cmd/server
+	cd web && $(WEB_BUILD)
+
+service-install: build
+	@$(SERVICE_SCRIPT) install
+
+service-start:
+	@$(SERVICE_SCRIPT) start
+
+service-stop:
+	@$(SERVICE_SCRIPT) stop
+
+service-restart:
+	@$(SERVICE_SCRIPT) restart
+
+service-status:
+	@$(SERVICE_SCRIPT) status
+
+service-logs:
+	@$(SERVICE_SCRIPT) logs
+
+service-uninstall:
+	@$(SERVICE_SCRIPT) uninstall
 
 proxy-status:
 	@curl -sS "$(API_BASE)/api/proxy/status"; echo

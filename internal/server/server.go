@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,21 +58,33 @@ func New(cfg config.Config) *App {
 }
 
 func (a *App) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/meta", a.handleMeta)
-	mux.HandleFunc("GET /api/accounts", a.handleAccounts)
-	mux.HandleFunc("GET /api/accounts/{file}", a.handleAccountDetail)
-	mux.HandleFunc("POST /api/accounts/login", a.handleLogin)
-	mux.HandleFunc("DELETE /api/accounts/{file}", a.handleDeleteAccount)
-	mux.HandleFunc("POST /api/accounts/{file}/probe", a.handleProbe)
-	mux.HandleFunc("GET /api/proxy/status", a.handleProxyStatus)
-	mux.HandleFunc("POST /api/proxy/start", a.handleProxyStart)
-	mux.HandleFunc("POST /api/proxy/stop", a.handleProxyStop)
-	mux.HandleFunc("POST /api/proxy/restart", a.handleProxyRestart)
-	mux.HandleFunc("GET /api/proxy/credentials", a.handleProxyCredentials)
-	mux.HandleFunc("POST /api/proxy/api-key/rotate", a.handleProxyRotateAPIKey)
+	api := http.NewServeMux()
+	api.HandleFunc("GET /api/meta", a.handleMeta)
+	api.HandleFunc("GET /api/accounts", a.handleAccounts)
+	api.HandleFunc("GET /api/accounts/{file}", a.handleAccountDetail)
+	api.HandleFunc("POST /api/accounts/login", a.handleLogin)
+	api.HandleFunc("DELETE /api/accounts/{file}", a.handleDeleteAccount)
+	api.HandleFunc("POST /api/accounts/{file}/probe", a.handleProbe)
+	api.HandleFunc("GET /api/proxy/status", a.handleProxyStatus)
+	api.HandleFunc("POST /api/proxy/start", a.handleProxyStart)
+	api.HandleFunc("POST /api/proxy/stop", a.handleProxyStop)
+	api.HandleFunc("POST /api/proxy/restart", a.handleProxyRestart)
+	api.HandleFunc("GET /api/proxy/credentials", a.handleProxyCredentials)
+	api.HandleFunc("POST /api/proxy/api-key/rotate", a.handleProxyRotateAPIKey)
 
-	return withCORS(withJSON(mux))
+	apiHandler := withCORS(withJSON(api))
+	if a.cfg.Mode != config.ModeService {
+		return apiHandler
+	}
+
+	frontend := newFrontendHandler(a.cfg.FrontendDistDir)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		frontend.ServeHTTP(w, r)
+	})
 }
 
 func (a *App) handleMeta(w http.ResponseWriter, _ *http.Request) {
@@ -83,11 +96,14 @@ func (a *App) handleMeta(w http.ResponseWriter, _ *http.Request) {
 
 	response := map[string]interface{}{
 		"version":                "v1.1",
+		"mode":                   a.cfg.Mode,
 		"host":                   a.cfg.Host,
 		"port":                   a.cfg.Port,
 		"authDir":                a.cfg.AuthDir,
 		"cliProxyPath":           a.cfg.CLIProxyPath,
 		"probeModel":             a.cfg.ProbeModel,
+		"frontendDistDir":        a.cfg.FrontendDistDir,
+		"frontendServing":        a.cfg.Mode == config.ModeService,
 		"usageSource":            "chatgpt_wham_usage",
 		"authDirAccessible":      authErr == nil,
 		"cliProxyAccessible":     cliErr == nil,

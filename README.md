@@ -21,6 +21,8 @@ Local Codex account control panel for Quotio-style workflows.
 - Copy-ready endpoint + API key for other OpenAI-compatible apps
 - One-click API key rotation (single persistent key strategy)
 - Conservative usage caching + jitter + backoff to reduce rate-limit risk
+- True service mode: Go serves the built frontend without a Vite dev server
+- macOS `launchd` install/start/stop/restart/status/logs/uninstall workflow
 
 ## Prerequisites
 - Go `1.25+`
@@ -87,6 +89,8 @@ installs to a versioned binary path, then atomically switches the active target.
 
 ## Run
 
+### Dev mode
+
 ```bash
 cd /path/to/quotio-lite
 make dev
@@ -94,6 +98,44 @@ make dev
 
 - Backend: `http://127.0.0.1:18417`
 - Frontend: `http://127.0.0.1:5173`
+- Vite proxies `/api` to the Go backend
+
+Use this for active development only. It intentionally runs two processes.
+
+### Service mode
+
+Service mode is a single Go process that serves:
+- API routes from `/api/*`
+- built frontend assets from `/`
+
+Build and install the launchd bundle:
+
+```bash
+make service-install
+```
+
+Manage the macOS user service:
+
+```bash
+make service-start
+make service-stop
+make service-restart
+make service-status
+make service-logs
+make service-uninstall
+```
+
+Installed service bundle paths:
+- Binary: `~/.quotio-lite/service/bin/quotio-lite`
+- Frontend bundle: `~/.quotio-lite/service/web`
+- LaunchAgent: `~/Library/LaunchAgents/io.github.kmfb.quotio-lite.plist`
+
+### Safety notes
+
+- `make dev` and `make service-*` are separate workflows; do not blindly manage one while the other is using port `18417`.
+- The launchd helpers only manage the `io.github.kmfb.quotio-lite` job and do **not** kill arbitrary processes.
+- `make service-start` refuses to start if port `18417` is already occupied by another process, to avoid disrupting an existing dev instance.
+- The service workflow does not manage Vite on port `5173`; if you already have a dev frontend there, leave it alone.
 
 Proxy control shortcuts (backend must be running):
 
@@ -105,10 +147,12 @@ make proxy-restart
 ```
 
 ## Environment variables
+- `QUOTIO_LITE_MODE` (`dev` by default, `service` for single-process mode)
 - `QUOTIO_LITE_HOST` (default `127.0.0.1`)
 - `QUOTIO_LITE_PORT` (default `18417`)
 - `QUOTIO_LITE_AUTH_DIR` (default `~/.cli-proxy-api`)
 - `QUOTIO_LITE_CLIPROXY_PATH` (default `~/.quotio-lite/bin/CLIProxyAPI`)
+- `QUOTIO_LITE_FRONTEND_DIST_DIR` (default `./web/dist` relative to the current working directory)
 - `QUOTIO_LITE_CLIPROXY_VERSION_DIR` (default `~/.quotio-lite/bin/versions`)
 - `QUOTIO_LITE_CLIPROXY_GITHUB_REPO` (default `router-for-me/CLIProxyAPI`)
 - `QUOTIO_LITE_PROBE_MODEL` (default `gpt-5.1-codex-mini`)
