@@ -43,6 +43,10 @@ type App struct {
 	expiryValidUntil    time.Time
 	expirySnapshot      accountexpiry.Snapshot
 	expiryFetchInFlight chan struct{}
+
+	// Background refresh control
+	stopRefreshCh chan struct{}
+	refreshWg     sync.WaitGroup
 }
 
 type probeSnapshot struct {
@@ -76,6 +80,7 @@ func (a *App) Handler() http.Handler {
 	api.HandleFunc("POST /api/proxy/start", a.handleProxyStart)
 	api.HandleFunc("POST /api/proxy/stop", a.handleProxyStop)
 	api.HandleFunc("POST /api/proxy/restart", a.handleProxyRestart)
+	api.HandleFunc("POST /api/proxy/refresh", a.handleProxyRefresh)
 	api.HandleFunc("GET /api/proxy/credentials", a.handleProxyCredentials)
 	api.HandleFunc("POST /api/proxy/api-key/rotate", a.handleProxyRotateAPIKey)
 
@@ -278,10 +283,13 @@ func (a *App) handleProxyStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
+	// Start background refresh to auto-update pool when quotas reset
+	a.startBackgroundRefresh()
 	writeJSON(w, http.StatusOK, status)
 }
 
 func (a *App) handleProxyStop(w http.ResponseWriter, r *http.Request) {
+	a.stopBackgroundRefresh()
 	status, err := a.proxy.Stop(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
@@ -306,6 +314,20 @@ func (a *App) handleProxyRestart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleProxyRefresh(w http.ResponseWriter, r *http.Request) {
+	a.invalidateAccountCaches()
+	if err := a.syncProxyPool(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	status, err := a.proxy.Status(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -379,8 +401,8 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 }
 
 func (a *App) getUsageSnapshot(ctx context.Context) managementusage.Snapshot {
-	const usageCacheTTL = 120 * time.Second
-	const usageCacheJitterMax = 30 * time.Second
+	const usageCacheTTL = 5 * time.Minute
+	const usageCacheJitterMax = 1 * time.Minute
 
 	a.mu.Lock()
 	now := time.Now()
@@ -573,4 +595,55 @@ func (a *App) syncProxyPool(ctx context.Context) error {
 	}
 
 	return a.proxy.SyncAccounts(records)
+}
+
+func (a *App) startBackgroundRefresh() {
+	a.mu.Lock()
+	if a.stopRefreshCh != nil {
+		// Already running
+		a.mu.Unlock()
+		return
+	}
+	a.stopRefreshCh = make(chan struct{})
+	a.refreshWg.Add(1)
+	a.mu.Unlock()
+
+	go func() {
+		defer a.refreshWg.Done()
+		// Refresh interval: 10 minutes with 2 minutes jitter (8-10 min)
+		ticker := time.NewTicker(a.refreshInterval())
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-a.stopRefreshCh:
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				_ = a.syncProxyPool(ctx)
+				cancel()
+				// Reset ticker with new jitter
+				ticker.Reset(a.refreshInterval())
+			}
+		}
+	}()
+}
+
+func (a *App) stopBackgroundRefresh() {
+	a.mu.Lock()
+	if a.stopRefreshCh == nil {
+		a.mu.Unlock()
+		return
+	}
+	close(a.stopRefreshCh)
+	a.stopRefreshCh = nil
+	a.mu.Unlock()
+	a.refreshWg.Wait()
+}
+
+func (a *App) refreshInterval() time.Duration {
+	// Base 8 minutes + 0-4 minutes jitter = 8-12 minutes
+	const base = 8 * time.Minute
+	const jitterMax = 4 * time.Minute
+	return base + randomDurationUpTo(jitterMax)
 }
