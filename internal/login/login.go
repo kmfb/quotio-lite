@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"quotio-lite/internal/accounts"
@@ -17,13 +19,39 @@ type Service struct {
 	CLIProxyPath string
 }
 
-type Result struct {
-	File string `json:"file"`
+type LoginMode string
+
+const (
+	LoginModeOAuth  LoginMode = "oauth"
+	LoginModeDevice LoginMode = "device"
+)
+
+type Capabilities struct {
+	Version                  string `json:"version"`
+	SupportsCodexLogin       bool   `json:"supportsCodexLogin"`
+	SupportsCodexDeviceLogin bool   `json:"supportsCodexDeviceLogin"`
+	SupportsNoBrowser        bool   `json:"supportsNoBrowser"`
+	SupportsIncognito        bool   `json:"supportsIncognito"`
 }
 
-func (s Service) LoginCodex(ctx context.Context, incognito bool) (Result, error) {
+type Result struct {
+	File         string       `json:"file"`
+	Mode         LoginMode    `json:"mode"`
+	Capabilities Capabilities `json:"capabilities"`
+}
+
+func (s Service) LoginCodex(ctx context.Context, mode LoginMode) (Result, error) {
 	if _, err := os.Stat(s.CLIProxyPath); err != nil {
 		return Result{}, fmt.Errorf("cli proxy unavailable: %w", err)
+	}
+
+	capabilities, err := s.Capabilities(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if mode == "" {
+		mode = LoginModeOAuth
 	}
 
 	before, err := (accounts.Store{AuthDir: s.AuthDir}).Snapshot()
@@ -40,9 +68,9 @@ func (s Service) LoginCodex(ctx context.Context, incognito bool) (Result, error)
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
 
-	args := []string{"-config", cfgPath, "-codex-login"}
-	if incognito {
-		args = append(args, "-incognito")
+	args, err := buildLoginArgs(mode, cfgPath, capabilities)
+	if err != nil {
+		return Result{}, err
 	}
 
 	cmd := exec.CommandContext(ctx, s.CLIProxyPath, args...)
@@ -64,7 +92,67 @@ func (s Service) LoginCodex(ctx context.Context, incognito bool) (Result, error)
 		return Result{}, fmt.Errorf("login finished but no credential file changed")
 	}
 
-	return Result{File: latest}, nil
+	return Result{File: latest, Mode: mode, Capabilities: capabilities}, nil
+}
+
+func (s Service) Capabilities(ctx context.Context) (Capabilities, error) {
+	if _, err := os.Stat(s.CLIProxyPath); err != nil {
+		return Capabilities{}, fmt.Errorf("cli proxy unavailable: %w", err)
+	}
+
+	helpCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(helpCtx, s.CLIProxyPath, "-h")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	_ = cmd.Run()
+
+	text := out.String()
+	caps := parseCapabilities(text)
+	if text == "" {
+		return Capabilities{}, fmt.Errorf("failed to inspect cli proxy capabilities: empty help output")
+	}
+	return caps, nil
+}
+
+func buildLoginArgs(mode LoginMode, cfgPath string, caps Capabilities) ([]string, error) {
+	args := []string{"-config", cfgPath}
+
+	switch mode {
+	case "", LoginModeOAuth:
+		if !caps.SupportsCodexLogin {
+			return nil, fmt.Errorf("CLIProxyAPI does not support Codex OAuth login in this version")
+		}
+		args = append(args, "-codex-login")
+	case LoginModeDevice:
+		if !caps.SupportsCodexDeviceLogin {
+			return nil, fmt.Errorf("CLIProxyAPI does not support Codex device login in this version")
+		}
+		args = append(args, "-codex-device-login")
+	default:
+		return nil, fmt.Errorf("unsupported login mode: %s", mode)
+	}
+
+	return args, nil
+}
+
+var versionPattern = regexp.MustCompile(`CLIProxyAPI Version:\s*([^,\s]+)`)
+
+func parseCapabilities(help string) Capabilities {
+	caps := Capabilities{
+		SupportsCodexLogin:       strings.Contains(help, "-codex-login"),
+		SupportsCodexDeviceLogin: strings.Contains(help, "-codex-device-login"),
+		SupportsNoBrowser:        strings.Contains(help, "-no-browser"),
+		SupportsIncognito:        strings.Contains(help, "-incognito"),
+	}
+
+	if matches := versionPattern.FindStringSubmatch(help); len(matches) == 2 {
+		caps.Version = strings.TrimSpace(matches[1])
+	}
+
+	return caps
 }
 
 func (s Service) writeTempConfig() (string, string, error) {

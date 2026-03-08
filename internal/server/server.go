@@ -79,6 +79,8 @@ func (a *App) handleMeta(w http.ResponseWriter, _ *http.Request) {
 	_, cliErr := os.Stat(a.cfg.CLIProxyPath)
 	proxyMeta := a.proxy.Meta()
 
+	loginCapabilities, loginCapsErr := a.login.Capabilities(context.Background())
+
 	response := map[string]interface{}{
 		"version":                "v1.1",
 		"host":                   a.cfg.Host,
@@ -93,6 +95,10 @@ func (a *App) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		"proxyManagedStatePath":  proxyMeta.ManagedStatePath,
 		"proxyDefaultPort":       proxyMeta.Port,
 		"proxyHost":              proxyMeta.Host,
+		"loginCapabilities":      loginCapabilities,
+	}
+	if loginCapsErr != nil {
+		response["loginCapabilitiesError"] = loginCapsErr.Error()
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -155,14 +161,14 @@ func (a *App) handleAccountDetail(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		Incognito bool `json:"incognito"`
+		Mode string `json:"mode"`
 	}
 	if err := decodeJSONBody(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	result, err := a.login.LoginCodex(r.Context(), payload.Incognito)
+	result, err := a.login.LoginCodex(r.Context(), login.LoginMode(payload.Mode))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

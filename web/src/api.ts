@@ -48,6 +48,14 @@ export interface AccountUsage {
   message: string
 }
 
+export interface LoginCapabilities {
+  version: string
+  supportsCodexLogin: boolean
+  supportsCodexDeviceLogin: boolean
+  supportsNoBrowser: boolean
+  supportsIncognito: boolean
+}
+
 export interface MetaResponse {
   version: string
   host: string
@@ -62,6 +70,8 @@ export interface MetaResponse {
   proxyManagedStatePath: string
   proxyDefaultPort: number
   proxyHost: string
+  loginCapabilities: LoginCapabilities
+  loginCapabilitiesError?: string
 }
 
 export interface PortConflict {
@@ -144,12 +154,12 @@ export async function getAccount(file: string): Promise<AccountDetail> {
   )
 }
 
-export async function loginCodex(payload: {
-  incognito?: boolean
+export async function loginCodex(payload?: {
+  mode?: 'oauth' | 'device'
 }): Promise<{ file: string; account: AccountDetail }> {
   return requestJSON('/api/accounts/login', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload ?? {}),
   })
 }
 

@@ -65,7 +65,7 @@ export function AccountsPage() {
   })
 
   const loginMutation = useMutation({
-    mutationFn: (incognito: boolean) => loginCodex({ incognito }),
+    mutationFn: () => loginCodex(),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['accounts'] })
     },
@@ -262,7 +262,7 @@ export function AccountsPage() {
               </Flex>
             ) : null}
             <Button
-              onClick={() => loginMutation.mutate(true)}
+              onClick={() => loginMutation.mutate()}
               disabled={loginMutation.isPending}
             >
               {loginMutation.isPending ? 'Logging in...' : 'Add Codex Account'}
@@ -354,6 +354,15 @@ export function AccountsPage() {
             <ExclamationTriangleIcon />
           </Callout.Icon>
           <Callout.Text>{accountsQuery.error.message}</Callout.Text>
+        </Callout.Root>
+      ) : null}
+
+      {loginMutation.isError ? (
+        <Callout.Root color="red" role="alert">
+          <Callout.Icon>
+            <ExclamationTriangleIcon />
+          </Callout.Icon>
+          <Callout.Text>{loginMutation.error.message}</Callout.Text>
         </Callout.Root>
       ) : null}
 
