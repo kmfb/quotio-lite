@@ -29,6 +29,12 @@ import {
   type AccountStatus,
 } from '../api'
 import { ProxyControlCard } from '../components/ProxyControlCard'
+import {
+  expiryDetail,
+  expiryHeadline,
+  expiryTone,
+  isExpirySoon,
+} from '../expiry'
 import { nextPollMs } from '../lib/polling'
 import { UsageGauge } from '../components/UsageGauge'
 import { statusColor, statusLabel } from '../status'
@@ -94,7 +100,8 @@ export function AccountsPage() {
     const ok = allAccounts.filter((item) => item.status === 'ok').length
     const team = allAccounts.filter((item) => item.type === 'team').length
     const lowQuota = allAccounts.filter(isLowQuota).length
-    return { total, ok, team, lowQuota }
+    const expiringSoon = allAccounts.filter((item) => isExpirySoon(item.expiry)).length
+    return { total, ok, team, lowQuota, expiringSoon }
   }, [allAccounts])
 
   const filteredAccounts = useMemo(() => {
@@ -112,6 +119,9 @@ export function AccountsPage() {
         item.type,
         item.accountId,
         item.usage.planType,
+        item.expiry.status,
+        item.expiry.expireDate,
+        item.expiry.orderId,
       ]
         .join(' ')
         .toLowerCase()
@@ -151,6 +161,20 @@ export function AccountsPage() {
         <Badge variant="soft" color="gray">
           {info.row.original.usage.planType || '-'}
         </Badge>
+      ),
+    }),
+    columnHelper.display({
+      id: 'expiry',
+      header: 'Expiry',
+      cell: (info) => (
+        <Flex direction="column" gap="1">
+          <Badge variant="soft" color={expiryTone(info.row.original.expiry)}>
+            {expiryHeadline(info.row.original.expiry)}
+          </Badge>
+          <Text size="1" color="gray">
+            {expiryDetail(info.row.original.expiry)}
+          </Text>
+        </Flex>
       ),
     }),
     columnHelper.display({
@@ -346,6 +370,14 @@ export function AccountsPage() {
             {summary.lowQuota}
           </Heading>
         </Card>
+        <Card className="summary-tile">
+          <Text size="1" color="gray">
+            Expiring ≤ 7d
+          </Text>
+          <Heading size="5" color={summary.expiringSoon > 0 ? 'orange' : 'gray'}>
+            {summary.expiringSoon}
+          </Heading>
+        </Card>
       </Flex>
 
       {accountsQuery.isError ? (
@@ -412,7 +444,7 @@ export function AccountsPage() {
               <Table.Body>
                 {table.getRowModel().rows.length === 0 ? (
                   <Table.Row>
-                    <Table.Cell colSpan={8}>
+                    <Table.Cell colSpan={9}>
                       <Text color="gray">No matching accounts found.</Text>
                     </Table.Cell>
                   </Table.Row>
@@ -421,7 +453,7 @@ export function AccountsPage() {
                     <Table.Row
                       key={row.id}
                       className={
-                        isLowQuota(row.original) ? 'accounts-row-risk' : undefined
+                        isRowRisk(row.original) ? 'accounts-row-risk' : undefined
                       }
                     >
                       {row.getVisibleCells().map((cell) => (
@@ -442,6 +474,10 @@ export function AccountsPage() {
       </Card>
     </Flex>
   )
+}
+
+function isRowRisk(record: AccountRecord): boolean {
+  return isLowQuota(record) || isExpirySoon(record.expiry)
 }
 
 function remainingPercent(usedPercent: number | null): number | null {

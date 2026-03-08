@@ -133,6 +133,10 @@ body {
   background: #fff4df;
 }
 
+.accounts-table .rt-Badge {
+	white-space: nowrap;
+}
+
 .raw-snippet {
   margin: 6px 0 0;
   padding: 10px;

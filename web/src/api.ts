@@ -20,6 +20,7 @@ export interface AccountRecord {
   lastProbeAt: string
   lastProbeMessage: string
   usage: AccountUsage
+  expiry: AccountExpiry
 }
 
 export interface AccountDetail extends AccountRecord {
@@ -44,6 +45,15 @@ export interface AccountUsage {
   window5h: UsageWindow
   weekly: UsageWindow
   planType: string
+  status: string
+  message: string
+}
+
+export interface AccountExpiry {
+  daysRemaining: number | null
+  expireDate: string
+  joinDate: string
+  orderId: string
   status: string
   message: string
 }

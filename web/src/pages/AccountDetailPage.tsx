@@ -15,6 +15,12 @@ import { ExclamationTriangleIcon } from '@radix-ui/react-icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getAccount, probeAccount } from '../api'
+import {
+  expiryDetail,
+  expiryHeadline,
+  expiryTone,
+  isExpirySoon,
+} from '../expiry'
 import { nextPollMs } from '../lib/polling'
 import { UsageGauge } from '../components/UsageGauge'
 import { statusColor, statusLabel } from '../status'
@@ -77,9 +83,15 @@ export function AccountDetailPage() {
               <Badge variant="soft" color="gray">
                 {detail.usage.planType || detail.type || '-'}
               </Badge>
+              <Badge variant="soft" color={expiryTone(detail.expiry)}>
+                {expiryHeadline(detail.expiry)}
+              </Badge>
             </Flex>
             <Text color="gray" size="2">
-              {detail.email}
+              {detail.email || '(no email)'}
+            </Text>
+            <Text color="gray" size="1">
+              {expiryDetail(detail.expiry)}
             </Text>
           </Box>
           <Flex gap="2" align="center">
@@ -102,6 +114,28 @@ export function AccountDetailPage() {
             <ExclamationTriangleIcon />
           </Callout.Icon>
           <Callout.Text>{probeMutation.error.message}</Callout.Text>
+        </Callout.Root>
+      ) : null}
+
+      {(detail.expiry.status === 'unavailable' ||
+        detail.expiry.status === 'missing_email') &&
+      detail.expiry.message ? (
+        <Callout.Root color="gray" role="status">
+          <Callout.Icon>
+            <ExclamationTriangleIcon />
+          </Callout.Icon>
+          <Callout.Text>{detail.expiry.message}</Callout.Text>
+        </Callout.Root>
+      ) : null}
+
+      {isExpirySoon(detail.expiry) ? (
+        <Callout.Root color="orange" role="status">
+          <Callout.Icon>
+            <ExclamationTriangleIcon />
+          </Callout.Icon>
+          <Callout.Text>
+            {expiryHeadline(detail.expiry)} · {expiryDetail(detail.expiry)}
+          </Callout.Text>
         </Callout.Root>
       ) : null}
 
@@ -145,6 +179,46 @@ export function AccountDetailPage() {
       </Card>
 
       <Flex className="detail-grid" gap="3" wrap="wrap">
+        <Card className="detail-panel">
+          <Heading size="3">Membership Expiry</Heading>
+          <DataList.Root>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Status</DataList.Label>
+              <DataList.Value>
+                <Badge color={expiryTone(detail.expiry)}>
+                  {expiryHeadline(detail.expiry)}
+                </Badge>
+              </DataList.Value>
+            </DataList.Item>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Upstream Status</DataList.Label>
+              <DataList.Value>{detail.expiry.status || '-'}</DataList.Value>
+            </DataList.Item>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Days Remaining</DataList.Label>
+              <DataList.Value>
+                {detail.expiry.daysRemaining ?? '-'}
+              </DataList.Value>
+            </DataList.Item>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Expire Date</DataList.Label>
+              <DataList.Value>{detail.expiry.expireDate || '-'}</DataList.Value>
+            </DataList.Item>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Join Date</DataList.Label>
+              <DataList.Value>{detail.expiry.joinDate || '-'}</DataList.Value>
+            </DataList.Item>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Order ID</DataList.Label>
+              <DataList.Value>{detail.expiry.orderId || '-'}</DataList.Value>
+            </DataList.Item>
+            <DataList.Item>
+              <DataList.Label minWidth="120px">Message</DataList.Label>
+              <DataList.Value>{detail.expiry.message || '-'}</DataList.Value>
+            </DataList.Item>
+          </DataList.Root>
+        </Card>
+
         <Card className="detail-panel">
           <Heading size="3">Account Metadata</Heading>
           <DataList.Root>
