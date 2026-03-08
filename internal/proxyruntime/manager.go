@@ -12,11 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"quotio-lite/internal/accounts"
 )
 
 const (
@@ -35,6 +38,10 @@ type Manager struct {
 	proxyDir   string
 	configPath string
 	statePath  string
+	poolDir    string
+
+	selectedFiles    []string
+	usingManagedPool bool
 
 	cmd      *exec.Cmd
 	waitDone chan struct{}
@@ -77,6 +84,11 @@ type Status struct {
 	APIKeyMasked     string        `json:"apiKeyMasked"`
 	LastError        string        `json:"lastError"`
 	PortConflict     *PortConflict `json:"portConflict,omitempty"`
+	SourceAuthDir    string        `json:"sourceAuthDir,omitempty"`
+	ActiveAuthDir    string        `json:"activeAuthDir,omitempty"`
+	ManagedAuthDir   string        `json:"managedAuthDir,omitempty"`
+	UsingManagedPool bool          `json:"usingManagedPool"`
+	SelectedFiles    []string      `json:"selectedFiles,omitempty"`
 }
 
 type Credentials struct {
@@ -117,6 +129,7 @@ func NewManager(cliProxyPath, authDir string) *Manager {
 		proxyDir:     proxyDir,
 		configPath:   filepath.Join(proxyDir, "config.yaml"),
 		statePath:    filepath.Join(proxyDir, "state.json"),
+		poolDir:      filepath.Join(proxyDir, "authpool"),
 	}
 
 	m.mu.Lock()
@@ -125,6 +138,46 @@ func NewManager(cliProxyPath, authDir string) *Manager {
 		m.lastError = err.Error()
 	}
 	return m
+}
+
+func (m *Manager) SyncAccounts(records []accounts.AccountRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := os.MkdirAll(m.proxyDir, 0o700); err != nil {
+		return fmt.Errorf("create proxy runtime dir: %w", err)
+	}
+	if err := os.MkdirAll(m.poolDir, 0o700); err != nil {
+		return fmt.Errorf("create proxy auth pool dir: %w", err)
+	}
+	if err := clearCandidateFiles(m.poolDir); err != nil {
+		return err
+	}
+
+	selected := selectProxyPool(records)
+	files := make([]string, 0, len(selected))
+	for _, record := range selected {
+		srcPath, err := accounts.ResolveCredentialPath(m.authDir, record.File)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(m.poolDir, record.File)
+		if err := copyFileContents(srcPath, dstPath); err != nil {
+			return err
+		}
+		files = append(files, record.File)
+	}
+	sort.Strings(files)
+	m.selectedFiles = files
+	m.usingManagedPool = len(files) > 0
+
+	if err := m.loadOrCreateStateLocked(); err != nil {
+		return err
+	}
+	if err := m.writeConfigLocked(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) Meta() Meta {
@@ -428,7 +481,7 @@ quota-exceeded:
   switch-preview-model: true
 request-retry: 1
 max-retry-interval: 5
-`, m.host, m.port, m.authDir, m.state.APIKey, m.state.ManagementKey)
+`, m.host, m.port, m.activeAuthDirLocked(), m.state.APIKey, m.state.ManagementKey)
 
 	if err := os.WriteFile(m.configPath, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write proxy config: %w", err)
@@ -465,6 +518,11 @@ func (m *Manager) statusLocked() Status {
 		APIKeyMasked:     maskAPIKey(m.state.APIKey),
 		LastError:        m.lastError,
 		PortConflict:     conflict,
+		SourceAuthDir:    m.authDir,
+		ActiveAuthDir:    m.activeAuthDirLocked(),
+		ManagedAuthDir:   m.poolDir,
+		UsingManagedPool: m.usingManagedPool,
+		SelectedFiles:    append([]string(nil), m.selectedFiles...),
 	}
 }
 
@@ -474,6 +532,144 @@ func (m *Manager) runningLocked() bool {
 
 func (m *Manager) endpointLocked() string {
 	return fmt.Sprintf("http://%s:%d/v1", m.host, m.port)
+}
+
+func (m *Manager) activeAuthDirLocked() string {
+	if m.usingManagedPool && len(m.selectedFiles) > 0 {
+		return m.poolDir
+	}
+	return m.authDir
+}
+
+func selectProxyPool(records []accounts.AccountRecord) []accounts.AccountRecord {
+	selected := make([]accounts.AccountRecord, 0, len(records))
+	for _, record := range records {
+		if !isProxyEligible(record) {
+			continue
+		}
+		selected = append(selected, record)
+	}
+
+	sort.Slice(selected, func(i, j int) bool {
+		left := selected[i]
+		right := selected[j]
+
+		leftProbeOK := strings.EqualFold(strings.TrimSpace(left.Status), "ok")
+		rightProbeOK := strings.EqualFold(strings.TrimSpace(right.Status), "ok")
+		if leftProbeOK != rightProbeOK {
+			return leftProbeOK
+		}
+
+		leftFiveHour := usagePercentOr(left.Usage.Window5H.UsedPercent, 101)
+		rightFiveHour := usagePercentOr(right.Usage.Window5H.UsedPercent, 101)
+		if leftFiveHour != rightFiveHour {
+			return leftFiveHour < rightFiveHour
+		}
+
+		leftWeekly := usagePercentOr(left.Usage.Weekly.UsedPercent, 101)
+		rightWeekly := usagePercentOr(right.Usage.Weekly.UsedPercent, 101)
+		if leftWeekly != rightWeekly {
+			return leftWeekly < rightWeekly
+		}
+
+		leftProbeAt := parseRFC3339OrZero(left.LastProbeAt)
+		rightProbeAt := parseRFC3339OrZero(right.LastProbeAt)
+		if !leftProbeAt.Equal(rightProbeAt) {
+			return leftProbeAt.After(rightProbeAt)
+		}
+
+		return left.File < right.File
+	})
+
+	return selected
+}
+
+func isProxyEligible(record accounts.AccountRecord) bool {
+	if strings.TrimSpace(record.File) == "" || record.Disabled || record.Expired {
+		return false
+	}
+
+	status := strings.ToLower(strings.TrimSpace(record.Status))
+	if status != "" && status != "unknown" && status != "ok" {
+		return false
+	}
+
+	usageStatus := strings.ToLower(strings.TrimSpace(record.Usage.Status))
+	if usageStatus != "" && usageStatus != "ok" {
+		return false
+	}
+
+	if usagePercentOr(record.Usage.Window5H.UsedPercent, 0) >= 100 || usagePercentOr(record.Usage.Weekly.UsedPercent, 0) >= 100 {
+		return false
+	}
+
+	combined := strings.ToLower(strings.TrimSpace(record.Usage.Message + " " + record.LastProbeMessage))
+	for _, blocked := range []string{
+		"insufficient_quota",
+		"usage_limit_reached",
+		"no codex access",
+		"auth_unavailable",
+		"status 403",
+		"permission_error",
+		"invalid token",
+		"expired",
+	} {
+		if strings.Contains(combined, blocked) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func usagePercentOr(value *float64, fallback float64) float64 {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func parseRFC3339OrZero(raw string) time.Time {
+	ts, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
+	if err != nil {
+		return time.Time{}
+	}
+	return ts
+}
+
+func clearCandidateFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read proxy auth pool dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "codex-") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return fmt.Errorf("remove stale pooled credential: %w", err)
+		}
+	}
+	return nil
+}
+
+func copyFileContents(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open pooled credential source: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create pooled credential file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy pooled credential: %w", err)
+	}
+	return nil
 }
 
 func detectPortConflict(host string, port int) *PortConflict {

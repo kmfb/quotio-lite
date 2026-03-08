@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"quotio-lite/internal/accountexpiry"
 	"quotio-lite/internal/accounts"
 	"quotio-lite/internal/config"
 	"quotio-lite/internal/login"
@@ -29,14 +30,19 @@ type App struct {
 	login    login.Service
 	probe    probe.Service
 	usage    *managementusage.Service
+	expiry   *accountexpiry.Service
 	proxy    *proxyruntime.Manager
 
-	mu                 sync.RWMutex
-	lastProbe          map[string]probeSnapshot
-	usageCachedAt      time.Time
-	usageValidUntil    time.Time
-	usageSnapshot      managementusage.Snapshot
-	usageFetchInFlight chan struct{}
+	mu                  sync.RWMutex
+	lastProbe           map[string]probeSnapshot
+	usageCachedAt       time.Time
+	usageValidUntil     time.Time
+	usageSnapshot       managementusage.Snapshot
+	usageFetchInFlight  chan struct{}
+	expiryCachedAt      time.Time
+	expiryValidUntil    time.Time
+	expirySnapshot      accountexpiry.Snapshot
+	expiryFetchInFlight chan struct{}
 }
 
 type probeSnapshot struct {
@@ -52,6 +58,7 @@ func New(cfg config.Config) *App {
 		login:     login.Service{AuthDir: cfg.AuthDir, CLIProxyPath: cfg.CLIProxyPath},
 		probe:     probe.Service{AuthDir: cfg.AuthDir, CLIProxyPath: cfg.CLIProxyPath, Model: cfg.ProbeModel, RequestTimeout: cfg.ProbeTimeout},
 		usage:     &managementusage.Service{AuthDir: cfg.AuthDir},
+		expiry:    &accountexpiry.Service{AuthDir: cfg.AuthDir},
 		proxy:     proxyruntime.NewManager(cfg.CLIProxyPath, cfg.AuthDir),
 		lastProbe: map[string]probeSnapshot{},
 	}
@@ -137,8 +144,10 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	a.mu.RUnlock()
 
 	usageSnapshot := a.getUsageSnapshot(r.Context())
+	expirySnapshot := a.getExpirySnapshot(r.Context())
 	for i := range records {
 		applyUsageToRecord(&records[i], usageSnapshot)
+		applyExpiryToRecord(&records[i], expirySnapshot)
 	}
 
 	sort.Slice(records, func(i, j int) bool {
@@ -171,6 +180,7 @@ func (a *App) handleAccountDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.RUnlock()
 	applyUsageToRecord(&detail.AccountRecord, a.getUsageSnapshot(r.Context()))
+	applyExpiryToRecord(&detail.AccountRecord, a.getExpirySnapshot(r.Context()))
 
 	writeJSON(w, http.StatusOK, detail)
 }
@@ -195,6 +205,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	a.invalidateAccountCaches()
+	applyUsageToRecord(&detail.AccountRecord, a.getUsageSnapshot(r.Context()))
+	applyExpiryToRecord(&detail.AccountRecord, a.getExpirySnapshot(r.Context()))
+	_ = a.syncProxyPool(r.Context())
 	writeJSON(w, http.StatusOK, map[string]interface{}{"file": result.File, "account": detail})
 }
 
@@ -212,6 +226,8 @@ func (a *App) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	delete(a.lastProbe, file)
 	a.mu.Unlock()
+	a.invalidateAccountCaches()
+	_ = a.syncProxyPool(r.Context())
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -228,11 +244,14 @@ func (a *App) handleProbe(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.lastProbe[file] = probeSnapshot{Status: result.Classification, At: now, Message: result.RawSnippet}
 	a.mu.Unlock()
+	_ = a.syncProxyPool(r.Context())
 
 	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *App) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
+	// Ensure proxy pool is synced before returning status
+	_ = a.syncProxyPool(r.Context())
 	status, err := a.proxy.Status(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -242,6 +261,10 @@ func (a *App) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleProxyStart(w http.ResponseWriter, r *http.Request) {
+	if err := a.syncProxyPool(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	status, err := a.proxy.Start(r.Context())
 	if err != nil {
 		var conflictErr *proxyruntime.PortConflictError
@@ -268,6 +291,10 @@ func (a *App) handleProxyStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleProxyRestart(w http.ResponseWriter, r *http.Request) {
+	if err := a.syncProxyPool(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	status, err := a.proxy.Restart(r.Context())
 	if err != nil {
 		var conflictErr *proxyruntime.PortConflictError
@@ -408,6 +435,63 @@ func (a *App) getUsageSnapshot(ctx context.Context) managementusage.Snapshot {
 	return snapshot
 }
 
+func (a *App) getExpirySnapshot(ctx context.Context) accountexpiry.Snapshot {
+	const expiryCacheTTL = 15 * time.Minute
+	const expiryCacheJitterMax = 5 * time.Minute
+
+	a.mu.Lock()
+	now := time.Now()
+	cached := a.expirySnapshot
+	validUntil := a.expiryValidUntil
+	if !validUntil.IsZero() && now.Before(validUntil) {
+		a.mu.Unlock()
+		return cached
+	}
+
+	if inFlight := a.expiryFetchInFlight; inFlight != nil {
+		a.mu.Unlock()
+		select {
+		case <-inFlight:
+		case <-ctx.Done():
+			a.mu.RLock()
+			fallback := a.expirySnapshot
+			a.mu.RUnlock()
+			if len(fallback.ByFile) > 0 || fallback.Status != "" {
+				return fallback
+			}
+			return accountexpiry.Snapshot{
+				Status:  "unavailable",
+				Message: ctx.Err().Error(),
+			}
+		}
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		return a.expirySnapshot
+	}
+
+	inFlight := make(chan struct{})
+	a.expiryFetchInFlight = inFlight
+	a.mu.Unlock()
+
+	snapshot, err := a.expiry.Fetch(ctx)
+	if err != nil {
+		snapshot = accountexpiry.Snapshot{
+			Status:  "unavailable",
+			Message: err.Error(),
+		}
+	}
+
+	validFor := expiryCacheTTL + randomDurationUpTo(expiryCacheJitterMax)
+	a.mu.Lock()
+	a.expirySnapshot = snapshot
+	a.expiryCachedAt = time.Now()
+	a.expiryValidUntil = a.expiryCachedAt.Add(validFor)
+	close(inFlight)
+	a.expiryFetchInFlight = nil
+	a.mu.Unlock()
+	return snapshot
+}
+
 func randomDurationUpTo(max time.Duration) time.Duration {
 	if max <= 0 {
 		return 0
@@ -440,4 +524,53 @@ func applyUsageToRecord(record *accounts.AccountRecord, snapshot managementusage
 	}
 
 	record.Usage = usage
+}
+
+func applyExpiryToRecord(record *accounts.AccountRecord, snapshot accountexpiry.Snapshot) {
+	expiry := accounts.AccountExpiry{
+		Status:  "unavailable",
+		Message: snapshot.Message,
+	}
+
+	if stats, ok := snapshot.ByFile[record.File]; ok {
+		expiry.DaysRemaining = stats.DaysRemaining
+		expiry.ExpireDate = stats.ExpireDate
+		expiry.JoinDate = stats.JoinDate
+		expiry.OrderID = stats.OrderID
+		expiry.Status = stats.Status
+		expiry.Message = stats.Message
+	}
+
+	record.Expiry = expiry
+}
+
+func (a *App) invalidateAccountCaches() {
+	a.mu.Lock()
+	a.usageValidUntil = time.Time{}
+	a.expiryValidUntil = time.Time{}
+	a.mu.Unlock()
+}
+
+func (a *App) syncProxyPool(ctx context.Context) error {
+	records, err := a.accounts.List()
+	if err != nil {
+		return err
+	}
+
+	a.mu.RLock()
+	for i := range records {
+		if s, ok := a.lastProbe[records[i].File]; ok {
+			records[i].Status = s.Status
+			records[i].LastProbeAt = s.At
+			records[i].LastProbeMessage = s.Message
+		}
+	}
+	a.mu.RUnlock()
+
+	usageSnapshot := a.getUsageSnapshot(ctx)
+	for i := range records {
+		applyUsageToRecord(&records[i], usageSnapshot)
+	}
+
+	return a.proxy.SyncAccounts(records)
 }
