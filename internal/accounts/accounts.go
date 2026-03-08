@@ -41,19 +41,29 @@ type AccountUsage struct {
 	Message  string      `json:"message"`
 }
 
+type AccountExpiry struct {
+	DaysRemaining *int   `json:"daysRemaining"`
+	ExpireDate    string `json:"expireDate"`
+	JoinDate      string `json:"joinDate"`
+	OrderID       string `json:"orderId"`
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+}
+
 type AccountRecord struct {
-	File             string       `json:"file"`
-	Email            string       `json:"email"`
-	Type             string       `json:"type"`
-	AccountID        string       `json:"accountId"`
-	Disabled         bool         `json:"disabled"`
-	Expired          bool         `json:"expired"`
-	LastRefresh      string       `json:"lastRefresh"`
-	MTime            string       `json:"mtime"`
-	Status           string       `json:"status"`
-	LastProbeAt      string       `json:"lastProbeAt"`
-	LastProbeMessage string       `json:"lastProbeMessage"`
-	Usage            AccountUsage `json:"usage"`
+	File             string        `json:"file"`
+	Email            string        `json:"email"`
+	Type             string        `json:"type"`
+	AccountID        string        `json:"accountId"`
+	Disabled         bool          `json:"disabled"`
+	Expired          bool          `json:"expired"`
+	LastRefresh      string        `json:"lastRefresh"`
+	MTime            string        `json:"mtime"`
+	Status           string        `json:"status"`
+	LastProbeAt      string        `json:"lastProbeAt"`
+	LastProbeMessage string        `json:"lastProbeMessage"`
+	Usage            AccountUsage  `json:"usage"`
+	Expiry           AccountExpiry `json:"expiry"`
 }
 
 type AccountDetail struct {
@@ -135,6 +145,7 @@ func (s Store) ReadDetail(file string) (AccountDetail, error) {
 			MTime:       info.ModTime().UTC().Format(time.RFC3339),
 			Status:      "unknown",
 			Usage:       defaultUsage(),
+			Expiry:      defaultExpiry(),
 		},
 		AccessTokenPresent:  !isEmptyUnknown(cred.AccessToken),
 		RefreshTokenPresent: !isEmptyUnknown(cred.RefreshToken),
@@ -251,6 +262,7 @@ func (s Store) readRecordFromFile(file string) (AccountRecord, error) {
 		MTime:       info.ModTime().UTC().Format(time.RFC3339),
 		Status:      "unknown",
 		Usage:       defaultUsage(),
+		Expiry:      defaultExpiry(),
 	}, nil
 }
 
@@ -341,5 +353,12 @@ func defaultUsage() AccountUsage {
 	return AccountUsage{
 		Status:  "unavailable",
 		Message: "Usage unavailable",
+	}
+}
+
+func defaultExpiry() AccountExpiry {
+	return AccountExpiry{
+		Status:  "unavailable",
+		Message: "Expiry unavailable",
 	}
 }
