@@ -585,40 +585,11 @@ func selectProxyPool(records []accounts.AccountRecord) []accounts.AccountRecord 
 }
 
 func isProxyEligible(record accounts.AccountRecord) bool {
+	// 只检查硬性条件：文件存在、账号未禁用、未过期
+	// 其他条件（用量、权限等）让代理层去处理，避免误判
 	if strings.TrimSpace(record.File) == "" || record.Disabled || record.Expired {
 		return false
 	}
-
-	status := strings.ToLower(strings.TrimSpace(record.Status))
-	if status != "" && status != "unknown" && status != "ok" {
-		return false
-	}
-
-	usageStatus := strings.ToLower(strings.TrimSpace(record.Usage.Status))
-	if usageStatus != "" && usageStatus != "ok" {
-		return false
-	}
-
-	if usagePercentOr(record.Usage.Window5H.UsedPercent, 0) >= 100 || usagePercentOr(record.Usage.Weekly.UsedPercent, 0) >= 100 {
-		return false
-	}
-
-	combined := strings.ToLower(strings.TrimSpace(record.Usage.Message + " " + record.LastProbeMessage))
-	for _, blocked := range []string{
-		"insufficient_quota",
-		"usage_limit_reached",
-		"no codex access",
-		"auth_unavailable",
-		"status 403",
-		"permission_error",
-		"invalid token",
-		"expired",
-	} {
-		if strings.Contains(combined, blocked) {
-			return false
-		}
-	}
-
 	return true
 }
 
